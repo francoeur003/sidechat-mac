@@ -77,3 +77,5 @@ output/
 *.zip
 *.spec
 !packaging/sidechat.spec
+
+!docs/screenshots/*.jpg

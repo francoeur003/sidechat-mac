@@ -2,7 +2,15 @@
 <h1 align="center">侧语 SideChat</h1>
 <p align="center">填两个 Key，打开微信，自动识别聊天区域。</p>
 
-[下载已发布版本](https://github.com/francoeur003/sidechat-mac/releases) · [安装说明](docs/安装说明.txt) · [原项目与许可](NOTICE.md)
+[下载 Mac 0.2.0 测试版](https://github.com/francoeur003/sidechat-mac/releases/tag/sidechat-v0.2.0) · [操作说明](docs/操作指南.md) · [安装说明](docs/安装说明.txt) · [原项目与许可](NOTICE.md)
+
+## 真实界面
+
+<img src="docs/screenshots/settings.jpg" width="420" alt="只需填写 Jev 和 DeepSeek 两个 Key">
+
+<img src="docs/screenshots/compact-permission.jpg" width="240" alt="240 宽小浮窗及首次权限提示">
+
+[查看连接操作步骤](docs/操作指南.md)：打开设置 → 点击连接 → 测试两个接口 → 返回浮窗。截图来自实际运行，未包含密钥和私人聊天。
 
 ## 极简版 0.2.0
 
@@ -38,10 +46,10 @@
 
 ## 验证
 
-- 31 项回归测试通过：自动定位、缩放、Retina、抽屉排除、歧义拒绝、消息状态隔离、服务商隔离、授权迁移及异常处理。
+- 32 项回归测试通过：自动定位、缩放、Retina、抽屉排除、歧义拒绝、消息状态隔离、服务商隔离、授权迁移及异常处理。
 - 使用合成句真实调用 Jev + DeepSeek，完成意图判断、两条回复生成和排序，单次约 4.1 秒。
 - 真实微信截图识别到聊天标题和 3 个文字气泡，排除侧栏、右侧小程序面板及输入框。实时截图遇到最后一条为图片时停止分析。
-- 极简设置窗口已实际打开；完整打包应用按钮链路仍待 macOS 钥匙串授权后继续验收。未把后端测试称为完整桌面验收。
+- 打包应用已实际点击连接，两个接口测试完成后返回小浮窗。完整微信识别到回复上屏的桌面链路仍待屏幕录制授权后验收。
 - 不同 Mac、Intel、深色微信和新包「填入」链路未测。
 
 作者抖音主页入口等待实际链接后启用，当前未配置。
