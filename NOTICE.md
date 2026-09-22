@@ -1,5 +1,11 @@
 # Attribution and distribution notices
 
+基于 [Jev 聊天助手](https://github.com/jev-chat/jev-chat-jarvis) 二次开发。
+Copyright (c) 2026 Finderchangchang and the jev-chat contributors.
+Credit to the original creators: **Finderchangchang 与 jev-chat 贡献者**.
+The original project notice is preserved in [docs/JEV_ORIGINAL_NOTICE.txt](docs/JEV_ORIGINAL_NOTICE.txt).
+This community adaptation does not imply endorsement by the original authors.
+
 SideChat (侧语) is a macOS distribution and adaptation of
 [jev-chat/jev-chat-jarvis-mac](https://github.com/jev-chat/jev-chat-jarvis-mac),
 originally copyright (c) 2026 eatmoreduck, licensed under the MIT License.

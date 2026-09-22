@@ -4,6 +4,12 @@
 
 [下载 Mac 0.2.0 测试版](https://github.com/francoeur003/sidechat-mac/releases/tag/sidechat-v0.2.0) · [操作说明](docs/操作指南.md) · [安装说明](docs/安装说明.txt) · [原项目与许可](NOTICE.md)
 
+## 原项目与创作者
+
+基于 [Jev 聊天助手（jev-chat/jev-chat-jarvis）](https://github.com/jev-chat/jev-chat-jarvis) 二次开发。感谢原创作者 **Finderchangchang 与 jev-chat 贡献者**；Mac 版本的直接代码基础来自 [jev-chat/jev-chat-jarvis-mac](https://github.com/jev-chat/jev-chat-jarvis-mac)，保留 **eatmoreduck** 的原作者版权与 MIT 许可。
+
+这是独立社区改版，不代表原作者出品或背书。原项目版权声明见 [原项目 NOTICE](docs/JEV_ORIGINAL_NOTICE.txt)；完整来源说明见 [NOTICE.md](NOTICE.md)。
+
 ## 真实界面
 
 <img src="docs/screenshots/settings.jpg" width="420" alt="只需填写 Jev 和 DeepSeek 两个 Key">
