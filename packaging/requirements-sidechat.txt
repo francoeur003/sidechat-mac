@@ -1,0 +1,7 @@
+numpy==2.5.3
+pyobjc-core==12.2.2
+pyobjc-framework-Cocoa==12.2.2
+pyobjc-framework-Quartz==12.2.2
+pyobjc-framework-Vision==12.2.2
+pyobjc-framework-ApplicationServices==12.2.2
+pyinstaller==6.22.3

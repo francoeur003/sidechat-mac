@@ -1,17 +1,14 @@
-"""Perception layer: find WeChat's window, capture it, OCR it, extract the conversation.
+"""Read a visible WeChat window through a calibrated region and native text bubbles.
 
-Validated facts this module is built on (probed 2026-09-21 on WeChat 4.1 Mac):
-  * `screencapture -l <windowid>` returns real content even when WeChat is not frontmost,
-    so our HUD floating above it never pollutes the capture.
-  * Vision OCR reads Simplified Chinese chat text at conf 1.00 on message bodies;
-    errors are rare and confined to unusual glyphs.
-  * The window layout is stable: chat list occupies x < ~0.30, chat pane x > ~0.32,
-    title bar above y ~0.90, input box below y ~0.09.
+Calibration stores geometry only. The sidebar and composer are physically excluded
+before OCR; separate header observations identify the conversation. Pixel matching is
+validated against the current light-mode Mac client, not a universal OCR guarantee.
 """
 
 from __future__ import annotations
 
 import re
+import hashlib
 import subprocess
 import tempfile
 import time
@@ -19,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import Quartz
+from chat_region import Region, load_region, image_pixels, bubble_boxes, latest_avatar_top
 
 # --- layout constants (normalized 0..1 within the window; tuned on the probe data) ---
 CHAT_PANE_X_MIN = 0.32
@@ -108,12 +106,14 @@ def request_screen_capture() -> bool:
 
 def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
     """Largest titled WeChat window (the main one). Independent of window order."""
-    opts = Quartz.kCGWindowListOptionAll | Quartz.kCGWindowListExcludeDesktopElements
-    wins = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID)
+    opts = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
+    wins = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []
     best: WindowInfo | None = None
     for w in wins:
         owner = w.get("kCGWindowOwnerName") or ""
         if "WeChat" not in owner and "微信" not in owner:
+            continue
+        if int(w.get("kCGWindowLayer") or 0) != 0:
             continue
         title = w.get("kCGWindowName") or ""
         b = dict(w.get("kCGWindowBounds") or {})
@@ -152,9 +152,12 @@ def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
 
 
 def capture_window(wid: int, out: Path) -> bool:
-    p = subprocess.run(["screencapture", "-x", "-o", "-l", str(wid), str(out)],
-                       capture_output=True, text=True)
-    return p.returncode == 0 and out.exists() and out.stat().st_size > 1000
+    try:
+        p = subprocess.run(["/usr/sbin/screencapture", "-x", "-o", "-l", str(wid), str(out)],
+                           capture_output=True, text=True, timeout=3)
+        return p.returncode == 0 and out.exists() and out.stat().st_size > 1000
+    except subprocess.TimeoutExpired:
+        return False
 
 
 # ----------------------------------------------------------------------------- ocr
@@ -302,7 +305,7 @@ def warm_ocr() -> float:
 _FP_W, _FP_H = 128, 224
 
 
-def _fingerprint(image) -> bytes | None:
+def _fingerprint(image, region=None, window_id=0) -> bytes | None:
     """The chat pane (title band down to just above the input box) as a small grayscale
     thumbnail; None when anything in the pipeline refuses.
 
@@ -320,17 +323,18 @@ def _fingerprint(image) -> bytes | None:
         # Layout constants here are bottom-origin (Vision's convention); CGImage cropping
         # is top-origin, so the band "input-area top edge .. window top" becomes
         # y=0 .. (1 - INPUT_AREA_Y_MIN) from the top.
+        region = region or Region(CHAT_PANE_X_MIN, .10, 1, 1-INPUT_AREA_Y_MIN)
         crop = Quartz.CGImageCreateWithImageInRect(
             image,
-            Quartz.CGRectMake(int(CHAT_PANE_X_MIN * w), 0,
-                              int((1.0 - CHAT_PANE_X_MIN) * w),
-                              int((1.0 - INPUT_AREA_Y_MIN) * h)))
+            Quartz.CGRectMake(int(region.left*w), 0,
+                              int((region.right-region.left)*w), int(region.bottom*h)))
         cs = Quartz.CGColorSpaceCreateDeviceGray()
         buf = ctypes.create_string_buffer(_FP_W * _FP_H)
         ctx = Quartz.CGBitmapContextCreate(
             buf, _FP_W, _FP_H, 8, _FP_W, cs, Quartz.kCGImageAlphaNone)
         Quartz.CGContextDrawImage(ctx, Quartz.CGRectMake(0, 0, _FP_W, _FP_H), crop)
-        return buf.raw
+        identity = hashlib.sha256(repr((window_id,w,h,region)).encode()).digest()
+        return identity + buf.raw
     except Exception:
         return None
 
@@ -346,9 +350,11 @@ def _same_frame(a: bytes | None, b: bytes | None) -> bool:
     """
     if a is None or b is None:
         return False
+    if len(a) != len(b) or a[:32] != b[:32]:
+        return False
     if a == b:
         return True
-    return sum(1 for x, y in zip(a, b) if abs(x - y) >= 8) < 6
+    return sum(1 for x, y in zip(a[32:], b[32:]) if abs(x - y) >= 8) < 6
 
 
 # ---------------------------------------------------------------------- extraction
@@ -362,117 +368,65 @@ def _is_noise(b: TextBlock) -> bool:
     return any(re.search(pat, b.text) for pat in UI_NOISE)
 
 
-def extract_chat_title(blocks: list[TextBlock]) -> str:
-    """Read the conversation name from the chat pane's header band.
-
-    Two rows live up there: the title itself and (when a chat is collapsed) a
-    "folded chats" banner. We take the topmost readable band and drop the banner.
-    """
-    cands = [b for b in blocks
-             if b.x >= CHAT_PANE_X_MIN and b.y > TITLE_BAR_Y_MAX
-             and b.conf >= 0.30 and len(b.text) >= 2 and not _is_noise(b)]
+def extract_chat_title(blocks: list[TextBlock], region=None) -> str:
+    region = region or Region(CHAT_PANE_X_MIN, .10, 1, .76)
+    cands = [b for b in blocks if b.x >= region.left and b.x_right <= region.right
+             and 0 <= 1-b.y-b.h < region.top and b.conf >= .3
+             and len(b.text) >= 2 and not _is_noise(b)]
     if not cands:
         return ""
-    cands.sort(key=lambda b: (-b.y, -len(b.text)))
-    top_y = cands[0].y
-    band = [b for b in cands if top_y - b.y < 0.03]
-    # the header also contains the chat-info / call / menu glyphs, which OCR turns into
-    # short junk. The conversation name is by far the longest run of text up there.
-    longest = max(band, key=lambda b: len(b.text))
-    if len(longest.text) < 4:
+    # Vision may split a title around an emoji/group number. Keep its adjacent pieces,
+    # otherwise groups "JARVIS 5" and "JARVIS 7" collapse onto the same identity.
+    cands = [b for b in cands if re.search(r"[\w\u4e00-\u9fff]",b.text)]
+    if not cands:
         return ""
-    keep = sorted((b for b in band if len(b.text) >= len(longest.text) * 0.5),
-                  key=lambda b: b.x)
-    return " ".join(b.text for b in keep).strip()
+    top = min(1-b.y-b.h for b in cands)
+    band = sorted([b for b in cands if abs(1-b.y-b.h-top)<.022],key=lambda b:b.x)
+    keep = [band[0]]
+    for b in band[1:]:
+        if b.x-keep[-1].x_right > .04:
+            break
+        keep.append(b)
+    return " ".join(b.text for b in keep)
 
 
-def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Message]:
-    """Turn raw OCR blocks into an ordered list of chat messages (bottom = newest)."""
-    chat = [b for b in blocks
-            if b.x >= CHAT_PANE_X_MIN and INPUT_AREA_Y_MIN < b.y < TITLE_BAR_Y_MAX
-            and not _is_noise(b)]
-    if not chat:
-        return []
+def extract_messages(blocks: list[TextBlock], max_messages: int = 12,
+                     *, region=None, bubbles=None) -> list[Message]:
+    """Read only text contained in a native bubble, never mutate Vision observations.
 
-    # Vision y is bottom-origin and bb.origin.y is the box's BOTTOM edge. Convert to a
-    # top-origin TOP edge (1 - y - h) so the stored y is literal: "distance from the
-    # pane's top to where this box starts". The old 1 - y stored the bottom edge's
-    # distance from the top — orderings and gap thresholds did not care (the transform
-    # is monotonic), but the YOLO overlay draws y as the top edge and every box sank by
-    # one box-height. Sorting and the fold/group logic below are unchanged either way.
-    for b in chat:
-        b.y = 1.0 - b.y - b.h
-    chat.sort(key=lambda b: b.y)
-
-    # group blocks that sit on the same visual line
-    lines: list[list[TextBlock]] = []
-    for b in chat:
-        if lines and abs(b.y - lines[-1][0].y) < 0.012:
-            lines[-1].append(b)
-        else:
-            lines.append([b])
-
-    merged = []
-    for group in lines:
-        group.sort(key=lambda b: b.x)
-        text = " ".join(b.text for b in group)
-        merged.append(TextBlock(text=text, conf=min(b.conf for b in group),
-                                x=min(b.x for b in group), y=group[0].y,
-                                w=max(b.x_right for b in group) - min(b.x for b in group),
-                                h=max(b.h for b in group)))
-
-    # left/right split inside the chat pane: the pane spans CHAT_PANE_X_MIN..1.0,
-    # so its midline is (CHAT_PANE_X_MIN + 1.0) / 2
-    midline = (CHAT_PANE_X_MIN + 1.0) / 2
-
-    # fold continuation lines (same side, tight vertical gap, no new sender header)
-    per_line = sorted(merged, key=lambda b: b.y)
-    messages: list[Message] = []
-    for b in per_line:
-        side = "me" if b.x_center > midline else "them"
-        # fold against the LAST folded line, not the message's first: comparing against
-        # the first line made every line from the third on measure ≥2 line-pitches away,
-        # so any 3+ line message was split into ≤2-line chunks — the judge then only ever
-        # saw the tail chunk, and the overlay drew a box per chunk
-        gap = (b.y - messages[-1].last_y) if messages else 1.0
-        if messages and messages[-1].side == side and gap < 0.045:
-            messages[-1].lines.append(b.text)
-            messages[-1].text = "\n".join(messages[-1].lines)
-            messages[-1].conf = min(messages[-1].conf, b.conf)
-            # grow the bounding box to cover the folded line (m.y stays the top line's)
-            m = messages[-1]
-            bottom = max(m.y + m.h, b.y + b.h)
-            m.x = min(m.x, b.x)
-            m.w = max(m.x + m.w, b.x + b.w) - m.x
-            m.h = bottom - m.y
-            m.last_y = b.y
-        else:
-            messages.append(Message(text=b.text, side=side, y=b.y, conf=b.conf,
-                                    h=b.h, lines=[b.text], x=b.x, w=b.w,
-                                    last_y=b.y))
-
-    # in group chats WeChat renders the sender name as a short line above the bubble.
-    # A wider-than-usual gap after a short line is the tell; that line becomes the
-    # following message's sender rather than a message of its own.
-    named: list[Message] = []
-    for i, m in enumerate(messages):
-        nxt = messages[i + 1] if i + 1 < len(messages) else None
-        if (nxt is not None and nxt.side == m.side and len(m.text) <= 16
-                and "\n" not in m.text
-                # two independent signals: the name line is set in smaller type and the
-                # line under it is set in message-sized type. Both must agree — a wrong
-                # name is worse than no name.
-                and m.h < USERNAME_H_MAX and nxt.h >= MESSAGE_H_MIN
-                and (nxt.y - m.y) > 0.035):
-            nxt.sender = m.text.strip().rstrip("：:")
+    Bubble boundaries keep wrapped lines together and separate adjacent senders.
+    Font height is not a speaker/name classifier: native text varies with window size.
+    """
+    if bubbles is None:
+        return []  # no unbounded text-only fallback
+    region = region or Region(CHAT_PANE_X_MIN, .10, 1, .76)
+    messages = []
+    for side,x0,y0,x1,y1 in bubbles:
+        inside = [b for b in blocks if b.conf >= MIN_CONF and b.text
+                  and x0 <= b.x_center <= x1 and y0 <= 1-b.y-b.h/2 <= y1
+                  and b.x >= x0-.003 and b.x_right <= x1+.003]
+        if not inside:
             continue
-        # A small-type line with nothing message-sized under it is a stray sender name
-        # (WeChat renders one above every bubble, including image-only messages). It is
-        # never something to judge, so drop it rather than show it as a message.
-        if m.h < USERNAME_H_MAX and len(m.text) <= 16 and "\n" not in m.text:
-            continue
-        named.append(m)
-    return named[-max_messages:]
+        inside.sort(key=lambda b: (round((1-b.y-b.h)/.008),b.x))
+        lines = []
+        for b in inside:
+            top = 1-b.y-b.h
+            if lines and abs(top-lines[-1][0]) < min(b.h*.5,.010):
+                lines[-1][1].append(b)
+            else:
+                lines.append([top,[b]])
+        texts = [" ".join(b.text for b in sorted(row,key=lambda b:b.x)) for _,row in lines]
+        # A sender may sit immediately above the bubble; it is metadata, never content.
+        names = [b for b in blocks if side == "them" and b.conf >= .3
+                 and abs(b.x-x0) < .02 and 0 < y0-(1-b.y) < .035
+                 and len(b.text) <= 40 and not _is_noise(b)
+                 and not any(a <= b.x_center <= c and d <= 1-b.y-b.h/2 <= e
+                             for _,a,d,c,e in bubbles)]
+        sender = min(names,key=lambda b:y0-(1-b.y)).text if names else None
+        messages.append(Message(text="\n".join(texts), side=side, y=y0,
+                                conf=min(b.conf for b in inside),h=y1-y0,sender=sender,
+                                lines=texts,x=x0,w=x1-x0,last_y=lines[-1][0]))
+    return sorted(messages,key=lambda m:m.y)[-max_messages:]
 
 
 def looks_like_sender_name(msg: Message, following: Message | None) -> bool:
@@ -489,62 +443,71 @@ def looks_like_sender_name(msg: Message, following: Message | None) -> bool:
 # ---------------------------------------------------------------------- public API
 
 
+def _ocr_region(image, region):
+    """Physically crop first. The OCR engine never receives the sidebar or composer."""
+    w,h = Quartz.CGImageGetWidth(image),Quartz.CGImageGetHeight(image)
+    left,right,bottom = int(region.left*w),int(region.right*w),int(region.bottom*h)
+    crop = Quartz.CGImageCreateWithImageInRect(image,Quartz.CGRectMake(left,0,right-left,bottom))
+    blocks = ocr_image(crop,chat_only=False)
+    for b in blocks:
+        b.x = (left+b.x*(right-left))/w
+        b.w *= (right-left)/w
+        b.y = 1-bottom/h+b.y*bottom/h
+        b.h *= bottom/h
+    return blocks
+
+
 def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
                       prev_fingerprint: bytes | None = None) -> dict:
-    """One-shot read: find window -> capture -> OCR -> messages.
-
-    Pass the previous call's "fingerprint" and an unchanged chat pane short-circuits
-    before OCR: ok=True with "unchanged": True, empty messages, and the window's current
-    geometry — the caller reuses what it last read and keeps positioning from fresh
-    coordinates. The fingerprint only exists on the in-process capture path; the
-    subprocess fallback returns fingerprint=None, which never matches (a permanently
-    slower read stays visible instead of silently skipping).
-    """
+    """Bounded capture -> calibrated crop -> bubble text. Temporary pixels stay local."""
+    from Foundation import NSURL
     t0 = time.perf_counter()
     win = find_wechat_window(previous_wid)
     if win is None:
-        return {"ok": False, "error": "WeChat main window not found", "messages": []}
-
-    # In-process capture + OCR off the CGImage is the fast path (~250 ms for the pair).
-    # The subprocess + PNG route stays as the fallback: it is ~150 ms slower, but it is the
-    # one that still worked when CGWindowListCreateImage had nothing to give.
-    image = capture_image(win.wid)
-    fingerprint = _fingerprint(image) if image is not None else None
-    window = {"wid": win.wid, "title": win.title, "w": win.w, "h": win.h,
-              "x": win.x, "y": win.y}
-    if _same_frame(fingerprint, prev_fingerprint):
-        total = (time.perf_counter() - t0) * 1000
-        return {"ok": True, "unchanged": True, "messages": [], "fingerprint": fingerprint,
-                "chat_title": "", "window": window, "n_blocks": 0,
-                "timing_ms": {"capture": total, "ocr": 0.0, "total": total,
-                              "capture_path": "memory"}}
-
+        return {"ok":False,"error":"未找到可见的微信聊天窗口","messages":[]}
+    window = {"wid":win.wid,"title":win.title,"w":win.w,"h":win.h,"x":win.x,"y":win.y}
+    try:
+        region = load_region(win.w,win.h)
+    except ValueError as exc:
+        return {"ok":False,"error":str(exc),"messages":[],"window":window}
+    # The deprecated CGWindowListCreateImage can block for minutes on this macOS.
+    # The official subprocess fallback is bounded and reliably captures current pixels.
+    with tempfile.TemporaryDirectory(prefix="jev-capture-") as td:
+        path = Path(td)/"window.png"
+        if not capture_window(win.wid,path):
+            return {"ok":False,"error":"无法读取微信窗口，请检查屏幕录制权限","messages":[],"window":window}
+        source = Quartz.CGImageSourceCreateWithURL(NSURL.fileURLWithPath_(str(path)),None)
+        image = Quartz.CGImageSourceCreateImageAtIndex(source,0,None)
+    if image is None:
+        return {"ok":False,"error":"截图为空，请重新打开微信","messages":[],"window":window}
+    fingerprint = _fingerprint(image,region,win.wid)
     t_cap = time.perf_counter()
-    capture_path = "memory" if image is not None else "subprocess"
-    if image is not None:
-        blocks = ocr_image(image)
-        t_ocr = time.perf_counter()
-    else:
-        with tempfile.TemporaryDirectory() as td:
-            png = Path(td) / "wechat.png"
-            if not capture_window(win.wid, png):
-                return {"ok": False, "error": "capture failed", "messages": []}
-            t_cap = time.perf_counter()
-            blocks = ocr(png)
-            t_ocr = time.perf_counter()
-
-    msgs = extract_messages(blocks, max_messages=max_messages)
-    return {
-        "ok": True,
-        "unchanged": False,
-        "chat_title": extract_chat_title(blocks),
-        "window": window,
-        "messages": msgs,
-        "timing_ms": {"capture": (t_cap - t0) * 1000, "ocr": (t_ocr - t_cap) * 1000,
-                      "total": (t_ocr - t0) * 1000, "capture_path": capture_path},
-        "n_blocks": len(blocks),
-        "fingerprint": fingerprint,
-    }
+    base = dict(window=window,region=region.as_dict(),fingerprint=fingerprint)
+    if _same_frame(fingerprint,prev_fingerprint):
+        return dict(base,ok=True,unchanged=True,messages=[],chat_title="",n_blocks=0,
+                    timing_ms=dict(capture=(t_cap-t0)*1000,ocr=0.,total=(t_cap-t0)*1000,capture_path="subprocess"))
+    blocks = _ocr_region(image,region)
+    pixels = image_pixels(image)
+    bubbles = bubble_boxes(pixels,region,win.w)
+    # A group-details drawer overlays the calibrated chat. Never turn its controls into chat.
+    controls = {b.text for b in blocks if any(label in b.text for label in
+                ("群聊名称","消息免打扰","保存到通讯录","群公告","搜索群成员"))
+                and not any(x0 <= b.x_center <= x1 and y0 <= 1-b.y-b.h/2 <= y1
+                            for _,x0,y0,x1,y1 in bubbles)}
+    if len(controls) >= 2:
+        return dict(base,ok=False,error="请先关闭微信右侧群资料面板",messages=[])
+    title = extract_chat_title(blocks,region)
+    msgs = extract_messages(blocks,max_messages,region=region,bubbles=bubbles)
+    avatar_top = latest_avatar_top(pixels,region,win.w)
+    if msgs and avatar_top is not None and avatar_top > msgs[-1].y+msgs[-1].h:
+        return dict(base,ok=False,error="最新一条未识别为文字，请等待文字消息或滚动到底部",messages=[])
+    t_ocr = time.perf_counter()
+    return dict(base,ok=True,unchanged=False,chat_title=title,messages=msgs,
+                context_id=(win.wid,re.sub(r"[（(]\d+[）)]$","",re.sub(r"\s+","",title)).casefold(),
+                            tuple(region.as_dict().values())),
+                timing_ms=dict(capture=(t_cap-t0)*1000,ocr=(t_ocr-t_cap)*1000,
+                               total=(t_ocr-t0)*1000,capture_path="subprocess"),
+                n_blocks=len(blocks))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,9 @@
+{
+  "provider": "deepseek",
+  "intent": "问进度",
+  "candidate_count": 2,
+  "ranked_count": 2,
+  "elapsed_s": 2.1,
+  "error": false,
+  "contains_private_chat": false
+}

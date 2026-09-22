@@ -128,6 +128,8 @@ def _label() -> str:
 
 
 def _sources() -> list[tuple[str, dict[str, str]]]:
+    if os.environ.get("SIDECHAT_MODE") == "1":
+        return [("SideChat", {})]
     return [
         ("环境变量", dict(os.environ)),
         (_label(), _merged_env_file()),
@@ -175,6 +177,8 @@ def provider(prefix: str) -> dict[str, str]:
 
 def load() -> dict[str, str]:
     """Copy the user env files into os.environ (variables already set win)."""
+    if os.environ.get("SIDECHAT_MODE") == "1":
+        return {}
     loaded = _merged_env_file()
     for key, val in loaded.items():
         if val and not os.environ.get(key):

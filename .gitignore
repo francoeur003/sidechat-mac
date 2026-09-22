@@ -68,3 +68,12 @@ htmlcov/
 .vscode/
 *.sublime-*
 .history/
+
+# Local work and acceptance evidence (never publish chat screenshots/configuration)
+output/
+!assets/*.png
+!assets/*.icns
+*.dmg
+*.zip
+*.spec
+!packaging/sidechat.spec

@@ -253,6 +253,10 @@ class FallbackJudge:
 
 def make_judge():
     """Jev when a key is configured, otherwise the local decider-2b."""
+    import os
+    if os.environ.get("SIDECHAT_MODE") == "1":
+        from sidechat_judge import CloudJudge
+        return CloudJudge()
     try:
         import judge_jev
         if judge_jev.jev_configured():

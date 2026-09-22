@@ -150,7 +150,7 @@ GROUP_GAP = 12            # between one group's rows and the next group's dropdo
 BOTTOM_PAD = 18           # below the last group
 
 
-LOG_PATH = Path.home() / "Library" / "Logs" / "jev-jarvis.log"
+LOG_PATH = Path.home() / "Library" / "Logs" / ("SideChat.log" if os.environ.get("SIDECHAT_MODE") == "1" else "jev-jarvis.log")
 
 
 def _log(msg: str) -> None:
@@ -203,6 +203,14 @@ class HudController(NSObject):
         if self is None:
             return None
         self.last_seen = None          # newest message text observed
+        # A text alone is not an identity: different chats routinely end in the same
+        # "好"/"收到".  Every asynchronous result carries this epoch and is discarded
+        # when the window, chat, calibrated region, or newest turn changes.
+        self._session_epoch = 0
+        self._context_id = None
+        self._latest_turn = None
+        self.wechat_win = None
+        self._read_region = None
         self.last_change_ts = 0.0      # when it last changed (burst detection)
         self.last_analyze_ts = 0.0     # rate limit for analysis starts
         self.analyzed_text = None      # what the panel currently shows
@@ -236,6 +244,7 @@ class HudController(NSObject):
         self._fingerprint = None    # last chat-pane fingerprint; equal ⇒ skip OCR entirely
         self._last_full = None      # last OCR'd result, reused while the pane is unchanged
         self._analyzing = False     # judge+generate runs off the tick path
+        self._analyzing_epoch = None
         # Pre-judgment: the local judge starts the moment a new message is seen, and the
         # settle gate consumes the verdict if the text is unchanged — intent/risk land on
         # screen ~1 s earlier and only the (paid) generation half still waits. Single-slot
@@ -275,6 +284,45 @@ class HudController(NSObject):
         self._build_overlay()
         self._expanded_h = self.panel.frame().size.height
         return self
+
+    @objc.python_method
+    def _context_key(self, res):
+        """Stable identity of exactly the chat area that produced an OCR result."""
+        context_id = res.get("context_id")
+        if context_id:
+            return context_id
+        win = res.get("window") or {}
+        region = res.get("region") or {}
+        return (win.get("wid"), res.get("chat_title") or "",
+                tuple(sorted(region.items())) if isinstance(region, dict) else region)
+
+    @objc.python_method
+    def _advance_session(self, *, clear_panel: bool = False, title: str = "") -> int:
+        """Retire all in-flight work before its result can reach a different chat."""
+        self._session_epoch += 1
+        self._gen_epoch += 1
+        self._stream_rows = {}
+        self._prejudge_req = None
+        self._prejudge_result = None
+        self._pregen_req = None
+        self._pregen_result = None
+        self.last_seen = None
+        self.analyzed_text = None
+        self._last_intent = ""
+        self._last_risk = 0.0
+        self._last_skip_reason = None
+        if clear_panel:
+            self._push_session("applyReset:", title, self._session_epoch)
+        return self._session_epoch
+
+    @objc.python_method
+    def _session_current(self, epoch: int) -> bool:
+        return not self._paused and epoch == self._session_epoch
+
+    @objc.python_method
+    def _push_session(self, selector: str, payload, epoch: int):
+        """Main-thread callback wrapper; checking here closes the queueing race."""
+        self._push("applySession:", (epoch, selector, payload))
 
     # ------------------------------------------------------------------ ui
     @objc.python_method
@@ -330,8 +378,14 @@ class HudController(NSObject):
                 tf.cell().setWraps_(True)
             view.addSubview_(tf)
             self.rows[key] = tf
-            self._fixed.append((tf, 14, dy, PANEL_W - 28, height))
+            self._fixed.append((tf, 14, dy, 242 if key == "chat" else PANEL_W - 28, height))
             dy += height + 8
+
+        self.region_button = self._make_button(266, 0, 80, 24, "框选范围", "pickChatRegion:", 0)
+        self.region_button.setHidden_(False)
+        self.region_button.setToolTip_("拖框固定微信聊天记录的识别范围")
+        view.addSubview_(self.region_button)
+        self._fixed.append((self.region_button, 266, 27, 80, 24))
 
         # ---- candidates section
         dy += 6
@@ -519,6 +573,7 @@ class HudController(NSObject):
             ("显示 / 收起面板", "collapsePanel:", ""),
             ("暂停读屏", "togglePause:", ""),
             ("YOLO 检测框", "toggleBoxes:", ""),
+            ("框选聊天区域…", "pickChatRegion:", ""),
             ("立即重新分析", "reanalyze:", ""),
         ):
             menu.addItemWithTitle_action_keyEquivalent_(title, action, key)
@@ -526,11 +581,12 @@ class HudController(NSObject):
         menu.addItemWithTitle_action_keyEquivalent_("退出 jev-jarvis", "quitApp:", "q")
         for item in menu.itemArray():
             item.setTarget_(self)
-        self.pause_item = menu.itemArray()[1]
-        self.boxes_item = menu.itemArray()[2]
+        self.pause_item = menu.itemWithTitle_("暂停读屏")
+        self.boxes_item = menu.itemWithTitle_("YOLO 检测框")
         self.boxes_item.setState_(
             AppKit.NSOnState if self._show_boxes else AppKit.NSOffState)
         self.status_item.setMenu_(menu)
+        self.panel.contentView().setMenu_(menu)
 
     @objc.python_method
     def _make_label(self, x, y, w, h, size=13, color=None, bold=False):
@@ -756,8 +812,9 @@ class HudController(NSObject):
             return
         self._render("status", f"换话术中…（{'、'.join(active)}）", PALETTE["muted"])
         self.rows["cand_header"].setStringValue_("候选回复 · 生成中…")
+        epoch = self._session_epoch
         threading.Thread(target=self._regen_work,
-                         args=(text, self._last_intent, list(self.slot_tones)),
+                         args=(text, self._last_intent, list(self.slot_tones), epoch),
                          daemon=True).start()
 
     @objc.python_method
@@ -797,7 +854,7 @@ class HudController(NSObject):
         return out
 
     @objc.python_method
-    def _stream_hook(self, t0: float, label: str = ""):
+    def _stream_hook(self, t0: float, label: str = "", session: int | None = None):
         """The on_candidate callback for the generation run starting now.
 
         Shared by all three run starters (_analyze, _run_generation, _regen_work) so the
@@ -807,6 +864,9 @@ class HudController(NSObject):
         for. The epoch check inside applyStreamLine_ is what makes a superseded run's late
         lines harmless.
         """
+        session = self._session_epoch if session is None else session
+        if not self._session_current(session):
+            return lambda _slot, _tone, _text: None
         self._gen_epoch += 1
         epoch = self._gen_epoch
         prefix = f"{label} " if label else ""
@@ -816,15 +876,17 @@ class HudController(NSObject):
             if not first_line["shown"]:
                 first_line["shown"] = True
                 _log(f"{prefix}首条候选上屏 {(time.perf_counter() - t0) * 1000:.0f}ms（未排序）")
-            self._push("applyStreamLine:", (epoch, slot, text))
+            self._push_session("applyStreamLine:", (epoch, slot, text), session)
         return on_candidate
 
     @objc.python_method
-    def _regen_work(self, text: str, intent: str, slot_tones: list[str]):
+    def _regen_work(self, text: str, intent: str, slot_tones: list[str], session: int):
         t0 = time.perf_counter()
         try:
+            if not self._session_current(session):
+                return
             gen = self.generator.generate(text, intent, slot_tones, None,
-                                          self._stream_hook(t0, "换话术"))
+                                          self._stream_hook(t0, "换话术", session))
             groups = gen.get("groups") or []
             failed = [f"{g['tone']}({g['error'][:40]})" for g in groups if g.get("error")]
             _log(f"换话术 生成 {gen.get('elapsed_s', 0) * 1000:.0f}ms · {len(groups)} 个话术"
@@ -833,17 +895,18 @@ class HudController(NSObject):
             if payload is None:
                 err = (gen.get("error") or "空结果")[:60]
                 _log(f"换话术无可用候选: {err}")
-                self._push("applyError:", f"候选生成失败: {err}")
+                self._push_session("applyError:", f"候选生成失败: {err}", session)
                 return
             # streamed endpoints already showed the lines; this push only matters for the
             # non-streaming shape (anthropic), which has no applyStreamLine_ at all
-            self._push("applyTones:", payload)
+            self._push_session("applyTones:", payload, session)
             ranked = self._rank_payload(payload, text, intent)
             _log(f"换话术 端到端 {(time.perf_counter() - t0) * 1000:.0f}ms")
-            self._push("applyTones:", ranked)
+            self._push_session("applyTones:", ranked, session)
         except Exception as e:
             _log(f"换话术失败 {type(e).__name__}: {str(e)[:60]}")
-            self._push("applyError:", f"换话术失败: {type(e).__name__}: {str(e)[:40]}")
+            self._push_session("applyError:", f"换话术失败: {type(e).__name__}: {str(e)[:40]}",
+                               session)
 
     @objc.python_method
     def _payload_current(self, payload) -> bool:
@@ -876,6 +939,7 @@ class HudController(NSObject):
         self._paused = not self._paused
         self.pause_item.setTitle_("继续读屏" if self._paused else "暂停读屏")
         if self._paused:
+            self._advance_session()
             self._prejudge_req = None        # a paused app judges nothing further
             self._prejudge_result = None
             self._pregen_req = None          # …and generates nothing further
@@ -892,19 +956,39 @@ class HudController(NSObject):
             self.rows["cand_header"].setStringValue_("")
             self._clear_candidates()
         else:
-            self._prejudge_result = None
-            self.last_seen = None      # force a fresh read of whatever is on screen
-            self.analyzed_text = None
+            self._advance_session()
             self._render("status", "已恢复 · 读屏中", PALETTE["muted"])
 
     def reanalyze_(self, sender):
-        self._prejudge_req = None      # "re-analyze" means re-run, not reuse the pre-judge
-        self._prejudge_result = None
-        self._pregen_req = None        # …and not reuse the early generation either
-        self._pregen_result = None
-        self.last_seen = None
-        self.analyzed_text = None
+        self._advance_session()        # re-run never accepts a result from the old turn
         self._render("status", "重新分析中…", PALETTE["muted"])
+
+    def pickChatRegion_(self, sender):
+        if not self.wechat_win:
+            self._render("status", "先读取到微信窗口后再框选", PALETTE["amber"])
+            return
+        try:
+            import region_picker
+
+            def on_saved(*_unused):
+                self._region_saved()
+
+            region_picker.begin_selection(self.wechat_win, on_saved)
+            self._render("status", "拖动框选消息区，松开后保存", PALETTE["muted"])
+        except Exception as e:
+            _log(f"框选区域失败 {type(e).__name__}: {str(e)[:60]}")
+            self._render("status", "框选区域启动失败", PALETTE["red"])
+
+    @objc.python_method
+    def _region_saved(self):
+        self._read_region = None
+        self._context_id = None
+        self._latest_turn = None
+        self._fingerprint = None
+        self._last_full = None
+        self._advance_session(clear_panel=True)
+        self._next_read_ts = 0.0
+        self._render("status", "识别区域已固定，重新读取中…", PALETTE["green"])
 
     def quitApp_(self, sender):
         AppKit.NSApplication.sharedApplication().terminate_(None)
@@ -957,6 +1041,9 @@ class HudController(NSObject):
     @objc.python_method
     def _work_inner(self):
         if not screen_capture_ok():
+            self._context_id = None
+            self._latest_turn = None
+            self._advance_session(clear_panel=True)
             if not self._asked_permission:
                 self._asked_permission = True
                 request_screen_capture()      # opens the system prompt
@@ -967,6 +1054,9 @@ class HudController(NSObject):
             res = read_conversation(previous_wid=self._win_wid,
                                     prev_fingerprint=self._fingerprint)
         except Exception as e:
+            self._context_id = None
+            self._latest_turn = None
+            self._advance_session(clear_panel=True)
             self._push("applyError:", f"读取失败: {type(e).__name__}: {str(e)[:40]}")
             self._next_read_ts = time.time() + SLOW_TICK
             return
@@ -974,9 +1064,54 @@ class HudController(NSObject):
             # WeChat gone or unreadable: the panel and the YOLO overlay go with it
             # (applyHidden_ existed for exactly this but was never wired — the panel used
             # to stay on screen with an error, and stale overlay boxes floated forever)
-            self._push("applyHidden:", res["error"])
+            self._context_id = None
+            self._latest_turn = None
+            window = res.get("window")
+            if window:
+                # A failed OCR may still have a valid WeChat frame (for example, no saved
+                # region or a resize). Keep it so the user can open the picker from the
+                # menu instead of being stranded behind a hidden panel.
+                self.wechat_win = window
+                self._win_wid = window.get("wid")
+                self._advance_session(clear_panel=True)
+                self._push("applyPosition:", window)
+                self._push("applyError:", res["error"])
+            else:
+                self._advance_session()
+                self._push("applyHidden:", res["error"])
             self._next_read_ts = time.time() + SLOW_TICK
             return
+
+        # An unchanged fast-path intentionally carries no OCR title/messages.  Recover the
+        # last full result before validating title/context, while retaining this tick's
+        # current window geometry and fingerprint for positioning and change detection.
+        if res.get("unchanged") and self._last_full is not None:
+            fast = res
+            res = dict(self._last_full)
+            res["window"] = fast["window"]
+            res["fingerprint"] = fast.get("fingerprint")
+            res["unchanged"] = True
+
+        title = (res.get("chat_title") or "").strip()
+        context_id = self._context_key(res)
+        # A missing title means the crop is not a trustworthy conversation.  Retire any
+        # previous chat before reporting it, otherwise a partially read sidebar can keep
+        # the old answer alive on screen.
+        if not title:
+            if self._context_id is not None:
+                self._context_id = None
+                self._latest_turn = None
+                self._last_full = None
+                self._advance_session(clear_panel=True, title="")
+            self._push("applyError:", "聊天标题没读到，已清空旧结果")
+            self._next_read_ts = time.time() + SLOW_TICK
+            return
+        context_changed = context_id != self._context_id
+        if context_changed:
+            self._context_id = context_id
+            self._latest_turn = None
+            self._last_full = None
+            self._advance_session(clear_panel=True, title=title)
 
         # Same fingerprint ⇒ same pixels ⇒ the messages are exactly what we last read.
         # Cadence follows the screen: quiet checks back in FAST_TICK (capture+hash only,
@@ -1000,29 +1135,47 @@ class HudController(NSObject):
         # showed up as a visible jump after the verdict landed. Pushed on unchanged
         # frames too — the window can move while its pixels stay identical.
         self._win_wid = res["window"]["wid"]
+        self.wechat_win = res["window"]
+        self._read_region = res.get("region")
         self._push("applyPosition:", res["window"])
-        if res["unchanged"] and self._last_full is not None:
-            # the settle/analyze gate below still runs every read; an unchanged frame
-            # just skips re-deriving the messages it would act on
-            res = self._last_full
-        else:
+        if not res["unchanged"]:
             self._last_full = res
-            self._push("applyChat:", res.get("chat_title") or "")
+            self._push_session("applyChat:", title, self._session_epoch)
 
         msgs = res["messages"]
         if not msgs:
-            self._push("applyError:", "聊天区没读到文字")
+            self._latest_turn = None
+            self._advance_session(clear_panel=True, title=title)
+            self._push_session("applyError:", "聊天区没读到文字，已清空旧结果",
+                               self._session_epoch)
+            if self._show_boxes:
+                self._push_session("applyBoxes:", (res["window"], [], None, self._read_region),
+                                   self._session_epoch)
             return
 
+        newest = msgs[-1]
+        turn = (self._context_id, tuple((m.side,m.sender,m.text) for m in msgs[-3:]))
+        if turn != self._latest_turn:
+            self._latest_turn = turn
+            if not context_changed:
+                self._advance_session()
+        session = self._session_epoch
         thems = [m for m in msgs if m.side == "them"]
-        newest = thems[-1] if thems else msgs[-1]
+        if newest.side != "them":
+            # Do not revive the prior incoming line after the user already replied.
+            self._push_session("applyReset:", title, session)
+            self._push_session("applyError:", "等待对方新消息", session)
+            if self._show_boxes:
+                self._push_session("applyBoxes:", (res["window"], msgs, None, self._read_region), session)
+            return
         prev_text = thems[-2].text if len(thems) > 1 else ""
 
         # YOLO overlay: repaint whenever a read produced geometry — unchanged reads reuse
         # the cached messages, so the boxes stay up even while the pane is quiet
         if self._show_boxes:
-            self._push("applyBoxes:", (res["window"], msgs,
-                                       newest.text if newest else None))
+            self._push_session("applyBoxes:", (res["window"], msgs,
+                                               newest.text if newest else None,
+                                               self._read_region), session)
         now = time.time()
 
         # --- anti-flood: track arrivals, never analyze mid-burst
@@ -1048,19 +1201,21 @@ class HudController(NSObject):
                  f"{EARLY_SETTLE_S}s）后上屏（两次完整分析最小间隔 {MIN_GAP_S}s）")
             # latest-wins: overwrite the slot, retire the old verdict — only the newest
             # text's judgment can ever be consumed, and only by the settle gate below
-            self._prejudge_req = (newest.text, self._context_text(msgs, newest, JUDGE_TURNS),
+            self._prejudge_req = (session, newest.text,
+                                  self._context_text(msgs, newest, JUDGE_TURNS),
                                   newest.sender, prev_text)
             self._prejudge_result = None
             self._prejudge_event.set()
             # same discipline for the generation half: fire now, supersede on the next
             # arrival, spend at settle. Tones are captured here — a dropdown click during
             # the window invalidates the result at consumption time (checked in _take_pregen)
-            self._pregen_req = (newest.text, self._context_text(msgs, newest),
+            self._pregen_req = (session, newest.text, self._context_text(msgs, newest),
                                 tuple(self.slot_tones))
             self._pregen_result = None
             self._pregen_event.set()
             # keep the previous verdict readable; just badge that something new landed
-            self._push("applyIncoming:", (newest.text, newest.sender, prev_text))
+            self._push_session("applyIncoming:", (newest.text, newest.sender, prev_text),
+                               session)
 
         # Anti-flood, two signals: the blind wait (SETTLE_S, unchanged upper bound) or a
         # content-stability early open — the pane went quiet for STABLE_READS consecutive
@@ -1071,7 +1226,7 @@ class HudController(NSObject):
                                           and self._stable_n >= STABLE_READS)
         cooled = (now - self.last_analyze_ts) >= MIN_GAP_S
         pr = self._prejudge_result
-        pre_hit = pr is not None and pr[0] == newest.text
+        pre_hit = pr is not None and pr[0] == session and pr[1] == newest.text
         # A pre-judged verdict needs no cooling: its cost was already paid per arrival.
         # Only the full path (no usable pre-judgment) still waits MIN_GAP_S out.
         if (newest.text != self.analyzed_text and settled and not self._analyzing
@@ -1080,21 +1235,23 @@ class HudController(NSObject):
             self.analyzed_text = newest.text
             self._prejudge_result = None      # spent: a verdict is shown exactly once
             self._analyzing = True
+            self._analyzing_epoch = session
             if pre_hit:
                 # Judgment already ran inside the settle window; go straight to the
                 # verdict on screen and start only the generation half.
                 _log(f"停稳 · 用预判结论上屏 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
-                self._push("applyJudgment:", (pr[1], pr[2], pr[3]))
+                self._push_session("applyJudgment:", (pr[2], pr[3], pr[4]), session)
                 threading.Thread(target=self._run_generation,
-                                 args=(newest, msgs, pr[1]), daemon=True).start()
+                                 args=(newest, msgs, pr[2], session), daemon=True).start()
             else:
                 _log(f"开始分析 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
-                self._push("applyPending:", (newest.text, newest.sender, prev_text))
+                self._push_session("applyPending:", (newest.text, newest.sender, prev_text),
+                                   session)
                 # off the tick path on purpose: judge+generate+rank takes over a second, and
                 # while it runs the loop must keep reading — a message landing mid-analysis
                 # used to wait the whole analysis out before anyone even saw it
                 threading.Thread(target=self._run_analysis,
-                                 args=(newest, msgs, prev_text), daemon=True).start()
+                                 args=(newest, msgs, prev_text, session), daemon=True).start()
         elif newest.text != self.analyzed_text:
             # the wait is deliberate; say so once per arrival change so "it feels slow" can
             # be told apart from "it is still waiting out the burst window"
@@ -1109,14 +1266,17 @@ class HudController(NSObject):
             self._last_skip_reason = None
 
     @objc.python_method
-    def _run_analysis(self, newest, msgs, prev_text: str):
+    def _run_analysis(self, newest, msgs, prev_text: str, session: int):
         try:
-            self._analyze(newest, msgs, prev_text)
+            self._analyze(newest, msgs, prev_text, session)
         except Exception as e:
             _log(f"分析失败 {type(e).__name__}: {str(e)[:60]}")
-            self._push("applyError:", f"分析失败: {type(e).__name__}: {str(e)[:40]}")
+            self._push_session("applyError:", f"分析失败: {type(e).__name__}: {str(e)[:40]}",
+                               session)
         finally:
-            self._analyzing = False
+            if self._analyzing_epoch == session:
+                self._analyzing = False
+                self._analyzing_epoch = None
 
     @objc.python_method
     def _prejudge_loop(self):
@@ -1137,8 +1297,8 @@ class HudController(NSObject):
                 self._prejudge_req = None
                 if req is None:
                     continue
-                text, context, sender, prev = req
-                if self._paused or text != self.last_seen:
+                session, text, context, sender, prev = req
+                if not self._session_current(session) or text != self.last_seen:
                     continue          # superseded while queued: only the newest text counts
                 self._prejudging = True
                 try:
@@ -1157,8 +1317,8 @@ class HudController(NSObject):
                     verdict = None
                 finally:
                     self._prejudging = False
-                if verdict is not None and not self._paused and text == self.last_seen:
-                    self._prejudge_result = (text, verdict, sender, prev)
+                if verdict is not None and self._session_current(session) and text == self.last_seen:
+                    self._prejudge_result = (session, text, verdict, sender, prev)
             except Exception:
                 pass                  # a resident worker must not die on one bad request
 
@@ -1179,8 +1339,8 @@ class HudController(NSObject):
                 self._pregen_req = None
                 if req is None:
                     continue
-                text, context, tones = req
-                if self._paused or text != self.last_seen:
+                session, text, context, tones = req
+                if not self._session_current(session) or text != self.last_seen:
                     continue          # superseded while queued: only the newest text counts
                 self._pregen_running = True
                 gen = None
@@ -1190,14 +1350,14 @@ class HudController(NSObject):
                     gen = None        # a failed early run just means the settle path regenerates
                 # store BEFORE clearing _pregen_running, so _take_pregen never observes
                 # "not running" without the result already visible
-                if gen is not None and not self._paused and text == self.last_seen:
-                    self._pregen_result = (text, tones, gen)
+                if gen is not None and self._session_current(session) and text == self.last_seen:
+                    self._pregen_result = (session, text, tones, gen)
                 self._pregen_running = False
             except Exception:
                 self._pregen_running = False
 
     @objc.python_method
-    def _take_pregen(self, text: str, tones: tuple) -> tuple[dict | None, float]:
+    def _take_pregen(self, session: int, text: str, tones: tuple) -> tuple[dict | None, float]:
         """Collect the early generation: (gen, waited_ms). gen=None ⇒ caller generates.
 
         A stored result counts only when BOTH the text and the tone selection match — the
@@ -1210,17 +1370,20 @@ class HudController(NSObject):
         deadline = time.time() + 30   # generation's own timeout; never wait longer
         while time.time() < deadline:
             r = self._pregen_result
-            if r is not None and r[0] == text and r[1] == tones:
+            if (r is not None and r[0] == session and r[1] == text and r[2] == tones
+                    and self._session_current(session)):
                 self._pregen_result = None      # spent: each result is consumed exactly once
-                return r[2], (time.perf_counter() - t0) * 1000
+                return r[3], (time.perf_counter() - t0) * 1000
+            if not self._session_current(session):
+                return None, (time.perf_counter() - t0) * 1000
             if (not self._pregen_running
-                    and (self._pregen_req is None or self._pregen_req[0] != text)):
+                    and (self._pregen_req is None or self._pregen_req[:2] != (session, text))):
                 return None, (time.perf_counter() - t0) * 1000
             time.sleep(0.03)
         return None, (time.perf_counter() - t0) * 1000
 
     @objc.python_method
-    def _gen_with_pregen(self, text: str, context: str | None,
+    def _gen_with_pregen(self, session: int, text: str, context: str | None,
                          on_candidate=None) -> dict:
         """Generate, preferring an early run already in flight or finished (full path).
 
@@ -1228,13 +1391,15 @@ class HudController(NSObject):
         and _finish_generate paints them the moment the verdict lands.
         """
         tones = tuple(self.slot_tones)
-        gen, _waited = self._take_pregen(text, tones)
+        gen, _waited = self._take_pregen(session, text, tones)
+        if not self._session_current(session):
+            return {"groups": []}
         if gen is None:
             gen = self.generator.generate(text, "", list(tones), context, on_candidate)
         return gen
 
     @objc.python_method
-    def _run_generation(self, newest, msgs, verdict: dict):
+    def _run_generation(self, newest, msgs, verdict: dict, session: int):
         """The pre-judged path's second half: collect generation + rank, judgment shown.
 
         The early run usually finished inside the settle window, so what is left here is
@@ -1245,18 +1410,23 @@ class HudController(NSObject):
         """
         t0 = time.perf_counter()
         try:
+            if not self._session_current(session):
+                return
             context = self._context_text(msgs, newest)
-            gen, wait_ms = self._take_pregen(newest.text, tuple(self.slot_tones))
+            gen, wait_ms = self._take_pregen(session, newest.text, tuple(self.slot_tones))
             note = f"（早跑命中，停稳后仅等 {wait_ms:.0f}ms）" if gen is not None else ""
             if gen is None:
                 gen = self.generator.generate(newest.text, "", list(self.slot_tones),
-                                              context, self._stream_hook(t0))
-            self._finish_generate(gen, newest, t0, verdict, note)
+                                              context, self._stream_hook(t0, session=session))
+            self._finish_generate(gen, newest, t0, verdict, session, note)
         except Exception as e:
             _log(f"生成失败 {type(e).__name__}: {str(e)[:60]}")
-            self._push("applyError:", f"候选生成失败: {type(e).__name__}: {str(e)[:40]}")
+            self._push_session("applyError:", f"候选生成失败: {type(e).__name__}: {str(e)[:40]}",
+                               session)
         finally:
-            self._analyzing = False
+            if self._analyzing_epoch == session:
+                self._analyzing = False
+                self._analyzing_epoch = None
 
     @objc.python_method
     def _context_text(self, msgs, newest, turns: int = CONTEXT_TURNS) -> str | None:
@@ -1282,7 +1452,7 @@ class HudController(NSObject):
             f"{m.sender or ('我' if m.side == 'me' else '对方')}: {m.text}" for m in prior)
 
     @objc.python_method
-    def _analyze(self, newest, msgs, prev_text: str = ""):
+    def _analyze(self, newest, msgs, prev_text: str = "", session: int | None = None):
         """Judge and generate in parallel, then rank. Judgment lands on screen first.
 
         Runs on its own thread (started by _work_inner): it takes over a second and must
@@ -1291,13 +1461,16 @@ class HudController(NSObject):
         import concurrent.futures as cf
 
         t0 = time.perf_counter()
+        session = self._session_epoch if session is None else session
+        if not self._session_current(session):
+            return
         context = self._context_text(msgs, newest)
         with cf.ThreadPoolExecutor(max_workers=2) as ex:
             # generation does not need the intent, so it runs while judging; it prefers an
             # early run that started at detection time (_gen_with_pregen) — only a miss
             # streams, and only that fresh call takes the hook
-            gen_future = ex.submit(self._gen_with_pregen, newest.text, context,
-                                   self._stream_hook(t0))
+            gen_future = ex.submit(self._gen_with_pregen, session, newest.text, context,
+                                   self._stream_hook(t0, session=session))
             verdict = None
             t_judge = time.perf_counter()
             try:
@@ -1313,22 +1486,24 @@ class HudController(NSObject):
                 _log(f"判断 {ms:.0f}ms → {verdict.get('intent', '?')}"
                      f" 把握 {verdict.get('confidence', 0):.0%}"
                      f" 风险 {verdict.get('risk', '?')}{note}")
-                self._push("applyJudgment:", (verdict, newest.sender, prev_text))
+                self._push_session("applyJudgment:", (verdict, newest.sender, prev_text), session)
             except Exception as e:
                 _log(f"判断失败 {type(e).__name__}: {str(e)[:60]}")
-                self._push("applyError:", f"判断失败: {type(e).__name__}: {str(e)[:40]}")
+                self._push_session("applyError:", f"判断失败: {type(e).__name__}: {str(e)[:40]}",
+                                   session)
 
             try:
                 gen = gen_future.result()
             except Exception as e:
                 _log(f"生成失败 {type(e).__name__}: {str(e)[:60]}")
-                self._push("applyError:", f"候选生成失败: {type(e).__name__}: {str(e)[:40]}")
+                self._push_session("applyError:", f"候选生成失败: {type(e).__name__}: {str(e)[:40]}",
+                                   session)
                 return
-            self._finish_generate(gen, newest, t0, verdict)
+            self._finish_generate(gen, newest, t0, verdict, session)
 
     @objc.python_method
     def _finish_generate(self, gen: dict, newest, t0: float, verdict: dict | None,
-                         note: str = ""):
+                         session: int, note: str = ""):
         """Log the generation, push candidates unranked, rank, push the ordered version.
 
         Shared by both analysis paths — the full one (judge ran here) and the pre-judged
@@ -1350,10 +1525,10 @@ class HudController(NSObject):
         if payload is None:
             err = (gen.get("error") or "空结果")[:60]
             _log(f"生成无可用候选: {err}")
-            self._push("applyError:", f"候选生成失败: {err}")
+            self._push_session("applyError:", f"候选生成失败: {err}", session)
             return
         if intent:
-            self._push("applyCandidates:", payload)
+            self._push_session("applyCandidates:", payload, session)
         t_rank = time.perf_counter()
         ranked = self._rank_payload(payload, newest.text, intent) if intent else payload
         rank_ms = (time.perf_counter() - t_rank) * 1000
@@ -1361,13 +1536,39 @@ class HudController(NSObject):
             _log(f"排序 {rank_ms:.0f}ms（本地模型，一次前向）")
         _log(f"端到端 {(time.perf_counter() - t0) * 1000:.0f}ms"
              f" · 从分析开始到候选上屏")
-        self._push("applyCandidates:", ranked)
+        self._push_session("applyCandidates:", ranked, session)
 
     @objc.python_method
     def _push(self, selector: str, payload=None):
         self.performSelectorOnMainThread_withObject_waitUntilDone_(selector, payload, False)
 
     # --- main-thread callbacks (AppKit is not thread safe)
+    def applySession_(self, payload):
+        self._apply_session_payload(payload)
+
+    @objc.python_method
+    def _apply_session_payload(self, payload):
+        epoch, selector, value = payload
+        if not self._session_current(epoch):
+            return
+        getattr(self, selector.replace(":", "_"))(value)
+
+    def applyReset_(self, title):
+        """A chat/region change must never leave the previous conversation on screen."""
+        self._chat_title = title
+        self._show()
+        self._render("chat", title, PALETTE["green"])
+        self._render("status", "识别新聊天中…", PALETTE["muted"])
+        self._render("message", "", PALETTE["text"])
+        self._render("sender", "", PALETTE["muted"])
+        self._render("intent", "—", PALETTE["muted"])
+        self._render("confidence", "", PALETTE["muted"])
+        self._render("risk", "", PALETTE["muted"])
+        self._render("actions", "", PALETTE["text"])
+        self.rows["cand_header"].setStringValue_("")
+        self._clear_candidates()
+        self._ov_panel.orderOut_(None)
+
     def applyChat_(self, title):
         self._chat_title = title
         self._render("chat", title, PALETTE["green"])
@@ -1463,7 +1664,11 @@ class HudController(NSObject):
 
     def applyError_(self, text):
         self._show()                       # never vanish without telling the user why
-        self._render("status", text, PALETTE["red"])
+        if "401" in text:
+            text = "回复接口认证失败（401）· 聊天识别正常"
+            self.rows["cand_header"].setStringValue_("候选回复暂不可用 · 请检查接口凭据")
+        color = PALETTE["muted"] if text.startswith("等待") else PALETTE["red"]
+        self._render("status", text, color)
 
     def applyHidden_(self, reason):
         # WeChat gone or unreadable -> take the panel away (the app "opens with WeChat")
@@ -1481,7 +1686,7 @@ class HudController(NSObject):
         """Repaint the overlay from the last read's window geometry + messages."""
         if not self._show_boxes:
             return
-        win, msgs, newest_text = payload
+        win, msgs, newest_text, region = payload
         W, H = win["w"], win["h"]
         flip = self._display_height()
         # top-left (Quartz) -> bottom-left (Cocoa), covering WeChat exactly
@@ -1493,6 +1698,24 @@ class HudController(NSObject):
                   and bool(self._last_intent))
         risk = int(round(float(self._last_risk)))
         boxes = []
+        if isinstance(region, dict):
+            try:
+                left = float(region["left"])
+                top = float(region["top"])
+                right = float(region["right"])
+                bottom = float(region["bottom"])
+                color = _rgb(0x00B8D9)
+                chip = NSAttributedString.alloc().initWithString_attributes_(
+                    "固定识别区域",
+                    {NSFontAttributeName: font,
+                     NSForegroundColorAttributeName: NSColor.whiteColor(),
+                     NSBackgroundColorAttributeName: color.colorWithAlphaComponent_(0.85)})
+                # region uses Quartz-style top origin; the overlay view uses Cocoa bottom origin.
+                boxes.append((NSMakeRect(left * W, H - bottom * H,
+                                         (right - left) * W, (bottom - top) * H),
+                              color, 2.0, chip))
+            except (KeyError, TypeError, ValueError):
+                pass
         for m in msgs:
             if m.w <= 0:
                 continue               # pre-overlay geometry: nothing to draw

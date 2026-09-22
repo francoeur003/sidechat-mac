@@ -224,6 +224,9 @@ def load_credentials() -> tuple[str, str, str, str, str]:
     The API shape is inferred from the endpoint (a path containing "anthropic" means the
     Anthropic /v1/messages format; everything else is assumed OpenAI-shaped).
     """
+    if os.environ.get("SIDECHAT_MODE") == "1":
+        from sidechat_providers import credentials
+        return credentials()
     oai = userconfig.provider("OPENAI")
     anth = userconfig.provider("ANTHROPIC")
 
@@ -315,6 +318,10 @@ class Generator:
         url = _endpoint(base, "openai")
         body = {"model": model, "max_tokens": 300, "temperature": 0.9,
                 "messages": [{"role": "user", "content": prompt}]}
+        if urllib.parse.urlsplit(base).hostname == "api.deepseek.com":
+            # Reply suggestions need the answer inside this short output budget.
+            # DeepSeek defaults to thinking mode, which can consume it before text.
+            body["thinking"] = {"type": "disabled"}
         headers = {"content-type": "application/json", "authorization": f"Bearer {key}"}
         if on_delta is not None:
             return self._stream_openai(url, headers, body, model, alt, on_delta)
@@ -439,9 +446,15 @@ class Generator:
         except ThinkingOnlyError as e:
             return [], str(e)            # already panel-ready: model named, fix suggested
         except urllib.error.HTTPError as e:
+            if os.environ.get("SIDECHAT_MODE") == "1":
+                from sidechat_providers import safe_error
+                return [], safe_error(e)
             detail = e.read()[:160].decode(errors="replace")
             return [], f"HTTP {e.code} @ {self._last_url} — {detail}"
         except Exception as e:
+            if os.environ.get("SIDECHAT_MODE") == "1":
+                from sidechat_providers import safe_error
+                return [], safe_error(e)
             return [], f"{type(e).__name__}: {e}"
         if on_line is not None:
             # Sync the callback with the authoritative parse. Two ways lines can be
