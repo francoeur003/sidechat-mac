@@ -19,7 +19,7 @@ exe=EXE(pyz,a.scripts,[],exclude_binaries=True,name='SideChat',debug=False,bootl
 coll=COLLECT(exe,a.binaries,a.datas,strip=False,upx=False,name='SideChat')
 app=BUNDLE(coll,name='SideChat.app',icon=str(root/'assets/SideChat.icns'),bundle_identifier='com.francoeur.sidechat',
     info_plist={'CFBundleName':'侧语 SideChat','CFBundleDisplayName':'侧语 SideChat',
-        'CFBundleShortVersionString':'0.1.0','CFBundleVersion':'1','LSMinimumSystemVersion':'14.0',
+        'CFBundleShortVersionString':'0.2.0','CFBundleVersion':'2','LSMinimumSystemVersion':'14.0',
         'NSHighResolutionCapable':True,
         'NSScreenCaptureUsageDescription':'侧语读取选定微信窗口，在本机识别文字；经同意后发送文字给所选模型接口。',
         'NSAppleEventsUsageDescription':'侧语可将选中的候选文字填入微信输入框，不会自动发送。'})

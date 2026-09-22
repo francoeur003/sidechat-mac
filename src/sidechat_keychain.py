@@ -31,7 +31,7 @@ def dictionary(pairs):
         C.addressof(C.c_byte.in_dll(CF,'kCFTypeDictionaryValueCallBacks')))
 
 def _query(provider):
-    if provider not in ('openai','deepseek','test'): raise ValueError('Unknown provider')
+    if provider not in ('openai','deepseek','jev','test'): raise ValueError('Unknown provider')
     service=string('com.francoeur.sidechat.'+provider)
     account=string('api-key')
     q=dictionary([('kSecClass',constant('kSecClassGenericPassword')),

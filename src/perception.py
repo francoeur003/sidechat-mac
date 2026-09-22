@@ -8,6 +8,7 @@ validated against the current light-mode Mac client, not a universal OCR guarant
 from __future__ import annotations
 
 import re
+import os
 import hashlib
 import subprocess
 import tempfile
@@ -128,7 +129,7 @@ def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
         if not title or wi.w < 600 or wi.h < 400:
             continue
         # only a titled, window-sized window can be the main chat window
-        if best is None or (wi.w * wi.h, wi.wid) > (best.w * best.h, best.wid):
+        if best is None or (wi.title in ('微信','WeChat'),wi.w * wi.h, wi.wid) > (best.title in ('微信','WeChat'),best.w * best.h, best.wid):
             best = wi
 
     # stick with the window we already chose: WeChat 4.x keeps several equally-sized
@@ -466,10 +467,12 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
     if win is None:
         return {"ok":False,"error":"未找到可见的微信聊天窗口","messages":[]}
     window = {"wid":win.wid,"title":win.title,"w":win.w,"h":win.h,"x":win.x,"y":win.y}
-    try:
-        region = load_region(win.w,win.h)
-    except ValueError as exc:
-        return {"ok":False,"error":str(exc),"messages":[],"window":window}
+    automatic = os.environ.get('SIDECHAT_MODE')=='1'
+    if not automatic:
+        try:
+            region = load_region(win.w,win.h)
+        except ValueError as exc:
+            return {"ok":False,"error":str(exc),"messages":[],"window":window}
     # The deprecated CGWindowListCreateImage can block for minutes on this macOS.
     # The official subprocess fallback is bounded and reliably captures current pixels.
     with tempfile.TemporaryDirectory(prefix="jev-capture-") as td:
@@ -480,6 +483,16 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
         image = Quartz.CGImageSourceCreateImageAtIndex(source,0,None)
     if image is None:
         return {"ok":False,"error":"截图为空，请重新打开微信","messages":[],"window":window}
+    pixels = image_pixels(image)
+    if automatic:
+        from auto_region import detect_region,AutoRegionError
+        try:
+            region = detect_region(pixels,win.w)
+        except AutoRegionError as exc:
+            # Manual calibration is only an explicit rescue for an unsupported layout.
+            try:region=load_region(win.w,win.h)
+            except ValueError:
+                return {"ok":False,"error":str(exc),"messages":[],"window":window,"region_uncertain":True}
     fingerprint = _fingerprint(image,region,win.wid)
     t_cap = time.perf_counter()
     base = dict(window=window,region=region.as_dict(),fingerprint=fingerprint)
@@ -487,7 +500,6 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
         return dict(base,ok=True,unchanged=True,messages=[],chat_title="",n_blocks=0,
                     timing_ms=dict(capture=(t_cap-t0)*1000,ocr=0.,total=(t_cap-t0)*1000,capture_path="subprocess"))
     blocks = _ocr_region(image,region)
-    pixels = image_pixels(image)
     bubbles = bubble_boxes(pixels,region,win.w)
     # A group-details drawer overlays the calibrated chat. Never turn its controls into chat.
     controls = {b.text for b in blocks if any(label in b.text for label in

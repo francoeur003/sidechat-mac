@@ -3,6 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 PY="${SIDECHAT_BUILD_PYTHON:-$ROOT/build/distribution-venv/bin/python}"
+VERSION="$("$PY" -c 'import runpy; print(runpy.run_path("src/sidechat_brand.py")["VERSION"])')"
 [[ "$(uname -m)" == arm64 ]] || { echo '本构建脚本只制作 Apple Silicon 版本'; exit 1; }
 mkdir -p build/SideChat.iconset
 for size in 16 32 128 256 512; do
@@ -19,6 +20,6 @@ mkdir -p dist/dmg-content
 ditto dist/SideChat.app dist/dmg-content/SideChat.app
 cp docs/安装说明.txt dist/dmg-content/
 ln -sfn /Applications dist/dmg-content/Applications
-hdiutil create -volname 'SideChat' -srcfolder dist/dmg-content -ov -format UDZO dist/SideChat-0.1.0-macOS-arm64.dmg
-ditto -c -k --sequesterRsrc --keepParent dist/SideChat.app dist/SideChat-0.1.0-macOS-arm64.zip
-(cd dist && shasum -a 256 SideChat-0.1.0-macOS-arm64.dmg SideChat-0.1.0-macOS-arm64.zip > SHA256SUMS.txt)
+hdiutil create -volname 'SideChat' -srcfolder dist/dmg-content -ov -format UDZO "dist/SideChat-$VERSION-macOS-arm64.dmg"
+ditto -c -k --sequesterRsrc --keepParent dist/SideChat.app "dist/SideChat-$VERSION-macOS-arm64.zip"
+(cd dist && shasum -a 256 "SideChat-$VERSION-macOS-arm64.dmg" "SideChat-$VERSION-macOS-arm64.zip" > SHA256SUMS.txt)

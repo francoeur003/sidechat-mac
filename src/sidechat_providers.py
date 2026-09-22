@@ -11,8 +11,10 @@ PROVIDERS={
     'openai': {'label':'GPT / OpenAI','base':'https://api.openai.com/v1','model':'gpt-4.1-mini'},
     'deepseek': {'label':'DeepSeek','base':'https://api.deepseek.com','model':'deepseek-flash'},
 }
+JEV_BASE='https://api.typesafe.ai'
+JEV_MODEL='jev-latest'
 DEFAULTS={'provider':'deepseek','models':{k:v['model'] for k,v in PROVIDERS.items()},
-          'consent':False,'tones':['高情商话术','贴吧老哥 v1.0','不用']}
+          'setup_version':2,'consent':False,'tones':['高情商话术','不用','不用']}
 _cache={}
 _lock=threading.RLock()
 
@@ -20,21 +22,15 @@ def load_settings():
     defaults=json.loads(json.dumps(DEFAULTS))
     try: data=json.loads(CONFIG_FILE.read_text())
     except (OSError,ValueError): return defaults
-    if data.get('provider') in PROVIDERS: defaults['provider']=data['provider']
-    defaults['consent']=data.get('consent') is True
-    for p in PROVIDERS:
-        model=data.get('models',{}).get(p)
-        if isinstance(model,str) and model.strip() and len(model)<100: defaults['models'][p]=model.strip()
-    if isinstance(data.get('tones'),list) and all(isinstance(s,str) for s in data['tones']):
-        defaults['tones']=data['tones'][:3]
+    if not isinstance(data,dict):return defaults
+    # v1 consent covered one selected service, not the new two-service workflow.
+    defaults['consent']=data.get('consent') is True and data.get('setup_version')==2
     return defaults
 
 def write_settings(data):
     # Explicit whitelist: never serialize credentials or arbitrary fields.
-    if data['provider'] not in PROVIDERS: raise ValueError('请选择有效接口')
-    clean={'provider':data['provider'],'models':{p:data['models'][p].strip() for p in PROVIDERS},
-           'consent':data.get('consent') is True,'tones':data.get('tones',DEFAULTS['tones'])[:3]}
-    if any(not m or len(m)>100 for m in clean['models'].values()): raise ValueError('请填写模型名称')
+    clean=json.loads(json.dumps(DEFAULTS))
+    clean['consent']=data.get('consent') is True
     CONFIG_DIR.mkdir(parents=True,exist_ok=True)
     tmp=CONFIG_FILE.with_suffix('.tmp');tmp.write_text(json.dumps(clean,ensure_ascii=False,indent=2))
     os.chmod(tmp,0o600);tmp.replace(CONFIG_FILE)
@@ -51,9 +47,35 @@ def set_key(provider,key):
     with _lock: _cache[provider]=key
 
 def credentials():
-    settings=load_settings(); p=settings['provider']; config=PROVIDERS[p]
+    settings=load_settings(); p='deepseek'; config=PROVIDERS[p]
     key=get_key(p) if settings['consent'] else ''
     return config['base'],key,settings['models'][p],'macOS 钥匙串','openai'
+
+def ready():
+    return load_settings()['consent'] and all(get_key(p) for p in ('jev','deepseek'))
+
+def jev_evaluate(state,questions,key=None):
+    from generate import http_post_json
+    if key is None:
+        if not load_settings()['consent']:raise ValueError('请先同意并连接两个接口')
+        key=get_key('jev')
+    if not key:raise ValueError('请填写 Jev API Key')
+    result=http_post_json(JEV_BASE+'/v1/systemone',
+        {'content-type':'application/json','authorization':'Bearer '+key},
+        {'model':JEV_MODEL,'state':state,'questions':questions},25)
+    if not isinstance(result,dict) or not isinstance(result.get('answers'),dict):
+        raise ValueError('Jev 返回格式无效')
+    return result
+
+def test_pair(keys):
+    from sidechat_judge import finite_number
+    try:
+        result=jev_evaluate('连接测试：你好。',{'connected':{'type':'noul','instructions':'这段文字是否含有问候？'}},keys['jev'])
+        finite_number(result['answers']['connected']['noul'],0,1)
+    except Exception as exc:raise RuntimeError('Jev：'+safe_error(exc)) from None
+    try:test_connection('deepseek',keys['deepseek'],PROVIDERS['deepseek']['model'])
+    except Exception as exc:raise RuntimeError('DeepSeek：'+safe_error(exc)) from None
+    return '两个接口连接成功'
 
 def safe_error(exc):
     if isinstance(exc,urllib.error.HTTPError):

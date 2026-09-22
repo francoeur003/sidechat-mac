@@ -1,26 +1,28 @@
-侧语 SideChat 0.1.0 — Mac Apple Silicon
+侧语 SideChat 0.2.0 — Mac Apple Silicon
 
-系统：macOS 14 或更新版本，Apple Silicon（M1/M2/M3/M4 等）。
-本包包含 Python 运行环境，无需安装 Python、uv、命令行工具或本地模型。
+系统：macOS 14 或更新版本，Apple Silicon（M1 及更新芯片）。
+已内置运行环境，无需 Python、终端或本地大模型。
 
-1. 将 SideChat.app 拖到 Applications（应用程序）。
-2. 打开 SideChat。在设置页填写自己的 GPT/OpenAI 或 DeepSeek API Key。
-3. 可先点“测试连接”（产生少量服务商 API 用量），再同意文字处理授权并保存。
-4. 在系统设置 → 隐私与安全性中，给 SideChat 开启“屏幕与系统音频录制”或“屏幕录制”。
-5. 打开微信，点“框选范围”，只框右侧聊天记录，不含左边会话列表、顶部标题和底部输入框。
-6. 如需“填入”，还需给 SideChat 开启“辅助功能”。填入不会点击发送。
+1. 把 SideChat.app 拖入 Applications（应用程序）。
+2. 首次只填 Jev API Key 和 DeepSeek API Key，点击“同意并连接”。
+   应用会先测试两个接口，连接成功后保存到本机钥匙串。
+   Jev 负责意图和排序，DeepSeek 负责生成回复，模型与地址已内置。
+3. 按 macOS 提示允许屏幕录制，然后打开一个微信对话。
+   浅色微信聊天区域会自动定位，窗口缩放后重新检测，无需默认手动框选。
+   不能确定范围时停止分析，点击“调整范围”手动修正。
+4. 看到回复后可复制；“填入”需要辅助功能权限，不会点击发送。
 
-本社区版本未经 Apple Developer ID 签名和公证。首次打开可能被 macOS 阻止。
-确认来源和下载校验值后，可由你本人在系统设置 → 隐私与安全性中允许打开。
-请勿关闭全局 Gatekeeper。没有安全提示时直接正常打开即可。
+升级 0.1.0 后需重新同意连接，因为新的流程会使用两个服务商。
+测试连接和分析会消耗各自 API 账户额度。聊天文字、上下文和候选回复会发往
+Jev 与 DeepSeek；截图只在本机用于 OCR。Key 不随应用分发。
 
-Key 保存在本机钥匙串，不随应用上传；设置与区域位于
-~/Library/Application Support/SideChat/，运行日志位于 ~/Library/Logs/SideChat.log。
-截图用于本机 OCR 并清理；识别的聊天文字、上下文和候选回复会发给你选择的 API 服务商。
-API 费用由该服务商按你的账户用量收取。模型分数是估计，不能保证正确或“最优”。
+本社区版本尚无 Apple Developer ID 签名与公证。
+首次运行被阻止时，请确认来源和 SHA256 校验值，再自行到系统设置 → 隐私与安全性允许打开。
+无需关闭全局 Gatekeeper。
 
-当前只支持微信桌面版可见文字和已校准布局；窗口尺寸改变后需重新框选。
-图片、表情、语音消息暂不分析。正在发送自己的消息时，会等待对方新消息。
-此版本未完成 Intel Mac 验收。
+自动检测只支持已验证的浅色微信桌面布局。无法确定、窗口过小或深色布局时不会猜测范围。
+图片、表情与语音暂不支持。模型判断不是保证正确的“最优解”。Intel 版本未验收。
 
-源代码与问题反馈：https://github.com/francoeur003/sidechat-mac
+本地设置：~/Library/Application Support/SideChat/
+运行日志：~/Library/Logs/SideChat.log
+源代码：https://github.com/francoeur003/sidechat-mac

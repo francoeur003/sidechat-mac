@@ -18,7 +18,8 @@ from sidechat_settings import SettingsController
 class SideChatController(HudController):
     @objc.python_method
     def _build_panel(self):
-        self.more=False; self.settings_controller=None
+        self.more=False; self.settings_controller=None;self.region_uncertain=False
+        self._credentials_ready=False;self._checking_credentials=False
         saved=providers.load_settings()['tones']
         self.slot_tones=[t if t in styles.PRESETS else styles.NONE_LABEL for t in saved]
         self.slot_tones=(self.slot_tones+[styles.NONE_LABEL]*3)[:3]
@@ -37,7 +38,7 @@ class SideChatController(HudController):
         self.settings_button=self._make_button(0,0,48,24,'设置','settings:',0);view.addSubview_(self.settings_button)
         self.more_button=self._make_button(0,0,216,24,'更多候选与话术','more:',0);view.addSubview_(self.more_button)
         self.author_button=self._make_button(0,0,216,24,'作者抖音主页 ↗' if brand.DOUYIN_URL else '项目主页 ↗','author:',0);view.addSubview_(self.author_button)
-        self.region_button=self._make_button(0,0,76,24,'框选范围','pickChatRegion:',0);view.addSubview_(self.region_button)
+        self.region_button=self._make_button(0,0,76,24,'调整范围','pickChatRegion:',0);view.addSubview_(self.region_button)
         self._tone_labels=[]
         for slot in range(styles.MAX_SLOTS):
             label=self._make_label(0,0,216,20,size=11,color=PALETTE['muted'],bold=True)
@@ -54,7 +55,8 @@ class SideChatController(HudController):
                 self._rows[slot].append(controls)
         self._wire_window_controls();self._install_status_item()
         self.panel.standardWindowButton_(A.NSWindowCloseButton).setToolTip_('退出侧语 SideChat')
-        self.rows['status'].setStringValue_('等待微信消息…');self._relayout()
+        self.rows['chat'].setStringValue_('打开一个微信对话')
+        self.rows['status'].setStringValue_('聊天区域会自动识别\n无需手动框选');self._relayout()
     @objc.python_method
     def _install_status_item(self):
         objc.super(SideChatController,self)._install_status_item()
@@ -62,6 +64,7 @@ class SideChatController(HudController):
         menu=self.status_item.menu()
         for existing in menu.itemArray():
             if str(existing.title())=='退出 jev-jarvis':existing.setTitle_('退出侧语 SideChat')
+            if str(existing.title())=='框选聊天区域…':existing.setTitle_('识别不准？调整范围…')
         item=A.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_('模型与接口…','settings:',',');item.setTarget_(self);menu.insertItem_atIndex_(item,0)
     @objc.python_method
     def _relayout(self):
@@ -97,9 +100,11 @@ class SideChatController(HudController):
             if any(self.cand_texts):
                 self.more_button.setTitle_('收起更多候选' if self.more else '更多候选与话术 ⌄')
                 put(self.more_button,12,y,216,24);y+=28
-            else:
+            elif self.region_uncertain:
                 put(self.region_button,12,y,84,24);y+=28
-            put(self.author_button,12,y,216,24);height=y+32
+            if any(self.cand_texts):
+                put(self.author_button,12,y,216,24);y+=28
+            height=max(136,y+8)
         view=self.panel.contentView();view.setFrameSize_(NSMakeSize(240,height))
         for c,x,y,w,h in placements:c.setFrame_(NSMakeRect(x,height-y-h,w,h))
         frame=self.panel.frame();top=frame.origin.y+frame.size.height
@@ -112,7 +117,9 @@ class SideChatController(HudController):
     @objc.python_method
     def _clear_candidates(self):
         objc.super(SideChatController,self)._clear_candidates();self._relayout()
-    def applyIncoming_(self,payload):objc.super(SideChatController,self).applyIncoming_(payload);self._relayout()
+    def applyIncoming_(self,payload):
+        self.region_uncertain=False
+        objc.super(SideChatController,self).applyIncoming_(payload);self._relayout()
     def applyReset_(self,title):objc.super(SideChatController,self).applyReset_(title);self._relayout()
     def applyStreamLine_(self,payload):objc.super(SideChatController,self).applyStreamLine_(payload);self._relayout()
     def collapsePanel_(self,sender):self._collapsed=not self._collapsed;self._relayout()
@@ -123,20 +130,41 @@ class SideChatController(HudController):
     def author_(self,sender):A.NSWorkspace.sharedWorkspace().openURL_(NSURL.URLWithString_(brand.DOUYIN_URL or brand.GITHUB_URL))
     def settingsSaved_(self,sender):
         self._paused=True;self._advance_session(clear_panel=True)
+        from generate import Generator
+        self.generator=Generator()
+        self._credentials_ready=True
         self.slot_tones=providers.load_settings()['tones'];self._fingerprint=None;self._last_full=None
         self._context_id=None;self._latest_turn=None;self.last_seen=None;self._next_read_ts=0
         self._paused=False;self.pause_item.setTitle_('暂停读屏')
-        self._render('status','设置已保存 · 正在读取微信')
+        self._render('status','接口已连接 · 正在自动识别微信')
     def tick_(self,timer):
-        s=providers.load_settings()
-        try:ready=s['consent'] and bool(providers.get_key(s['provider']))
-        except Exception:ready=False
-        if not ready:
-            self._render('status','请在设置中填写 Key 并授权使用');return
+        if not providers.load_settings()['consent']:
+            self._render('status','请在设置中填写两个 Key\n点击「同意并连接」');return
+        if not self._credentials_ready:
+            if not self._checking_credentials:
+                self._checking_credentials=True
+                self._render('status','正在读取本机钥匙串…')
+                def check():
+                    try:ready=bool(providers.ready())
+                    except Exception:ready=False
+                    self.performSelectorOnMainThread_withObject_waitUntilDone_('credentialsChecked:',ready,False)
+                threading.Thread(target=check,daemon=True).start()
+            return
         objc.super(SideChatController,self).tick_(timer)
+    def credentialsChecked_(self,ready):
+        self._credentials_ready=bool(ready)
+        if not ready:
+            self._render('status','无法读取 Key，请在设置中重新连接')
+            self.settings_(None)
     def applyError_(self,text):
+        self.region_uncertain=any(s in text for s in ('聊天区域','聊天标题','框选'))
         if 'HTTP' in text or 'Error' in text:text='分析失败，请检查接口设置或连接'
         objc.super(SideChatController,self).applyError_(text);self._relayout()
+    def applyHidden_(self,reason):
+        self._fingerprint=None;self._last_full=None;self._win_wid=None;self.wechat_win=None
+        self.region_uncertain=False;self.applyReset_('打开一个微信对话')
+        self._render('status','聊天区域会自动识别\n等待聊天窗口…',PALETTE['muted'])
+        self._ov_panel.orderOut_(None);self._show();self._relayout()
 
 def main():
     app=A.NSApplication.sharedApplication();app.setActivationPolicy_(A.NSApplicationActivationPolicyRegular)
@@ -145,10 +173,7 @@ def main():
     controller=SideChatController.alloc().init();controller._show();controller.panel.center()
     timer=NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(.25,controller,'tick:',None,True)
     A.NSRunLoop.currentRunLoop().addTimer_forMode_(timer,A.NSDefaultRunLoopMode)
-    s=providers.load_settings()
-    try:ready=s['consent'] and bool(providers.get_key(s['provider']))
-    except Exception:ready=False
-    if not ready:controller.settings_(None)
+    if not providers.load_settings()['consent']:controller.settings_(None)
     threading.Thread(target=controller._warm,daemon=True).start()
     app.run()
 
