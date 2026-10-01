@@ -2,7 +2,20 @@
 <h1 align="center">侧语 SideChat</h1>
 <p align="center">填两个 Key，打开微信，自动识别聊天区域。</p>
 
-[下载 Mac 0.2.0 测试版](https://github.com/francoeur003/sidechat-mac/releases/tag/sidechat-v0.2.0) · [操作说明](docs/操作指南.md) · [安装说明](docs/安装说明.txt) · [原项目与许可](NOTICE.md)
+[下载 Windows / Mac 0.3.0 测试版](https://github.com/francoeur003/sidechat-mac/releases/tag/sidechat-v0.3.0) · [操作说明](docs/操作指南.md) · [安装说明](docs/安装说明.txt) · [原项目与许可](NOTICE.md)
+
+## Windows / Mac 下载
+
+| 系统 | 安装包 | 使用方式 |
+|---|---|---|
+| Windows 10 / 11 x64 | [Setup.exe 安装器](https://github.com/francoeur003/sidechat-mac/releases/download/sidechat-v0.3.0/SideChat-0.3.0-Windows-x64-Setup.exe) | 框选或粘贴对方消息，检查文字后分析，复制建议 |
+| Mac Apple Silicon · macOS 14+ | [DMG 安装包](https://github.com/francoeur003/sidechat-mac/releases/download/sidechat-v0.3.0/SideChat-0.3.0-macOS-arm64.dmg) | 自动定位浅色微信聊天区域，显示回复建议 |
+
+两版均自带运行环境。需要自己的 Jev / DeepSeek API Key，调用会消耗服务额度。
+Windows 版是首次移植测试版，采用手动选择消息，不自动定位微信、不后台轮询、不自动填入。
+截图在本机 OCR，先确认文字再发送给 API；Windows OCR 需要简体中文语言包的文字识别功能，也可直接粘贴文字。
+Windows Key 使用系统凭据管理器；Mac Key 使用钥匙串。两版均未商业签名；Mac 未公证。
+[Windows 安装与使用说明](docs/Windows安装说明.txt)。Windows 实机微信 + 双 API 完整链路仍待用户验收。
 
 ## 原项目与创作者
 
@@ -18,7 +31,7 @@
 
 [查看连接操作步骤](docs/操作指南.md)：打开设置 → 点击连接 → 测试两个接口 → 返回浮窗。截图来自实际运行，未包含密钥和私人聊天。
 
-## 极简版 0.2.0
+## Mac 极简版 0.3.0
 
 适用 **Apple Silicon（M1 及更新芯片）、macOS 14+**。自带运行环境，无需 Python、命令行工具或本地大模型。
 

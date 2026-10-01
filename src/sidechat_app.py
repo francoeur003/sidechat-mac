@@ -168,6 +168,18 @@ class SideChatController(HudController):
 
 def main():
     app=A.NSApplication.sharedApplication();app.setActivationPolicy_(A.NSApplicationActivationPolicyRegular)
+    if '--smoke-test' in sys.argv:
+        # Exercise packaged Cocoa imports and real native panel without reading
+        # saved credentials, permissions, chat windows, or calling any provider.
+        from unittest.mock import patch
+        import json
+        with patch.object(providers,'load_settings',return_value=providers.DEFAULTS):
+            controller=SideChatController.alloc().init()
+            controller._show();controller.panel.center()
+            A.NSRunLoop.currentRunLoop().runUntilDate_(A.NSDate.dateWithTimeIntervalSinceNow_(0.3))
+            controller.panel.orderOut_(None)
+            Path('/tmp/sidechat-mac-smoke-result.json').write_text(json.dumps({'native_gui':'pass','version':brand.VERSION}))
+        return
     # Single instance: prevents duplicate API calls and competing floating windows.
     if len(A.NSRunningApplication.runningApplicationsWithBundleIdentifier_(brand.BUNDLE_ID))>1:return
     controller=SideChatController.alloc().init();controller._show();controller.panel.center()

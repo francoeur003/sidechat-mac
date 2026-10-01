@@ -183,7 +183,10 @@ def main():
         buffer=io.BytesIO();image.save(buffer,format='PNG')
         text=asyncio.run(recognize_png(buffer.getvalue(),'en-US'))
         if 'sidechat' not in text.lower():raise RuntimeError('Synthetic local OCR failed')
-        root.update();root.destroy()
+        root.update()
+        from PIL import ImageGrab
+        ImageGrab.grab(bbox=(root.winfo_rootx(),root.winfo_rooty(),root.winfo_rootx()+root.winfo_width(),root.winfo_rooty()+root.winfo_height())).save('smoke-ui.png')
+        root.destroy()
         Path('smoke-result.json').write_text(json.dumps({'gui':'pass','local_ocr':'pass'}))
         return
     root.mainloop()

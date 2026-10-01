@@ -1,4 +1,4 @@
-侧语 SideChat 0.2.0 — Mac Apple Silicon
+侧语 SideChat 0.3.0 — Mac Apple Silicon
 
 系统：macOS 14 或更新版本，Apple Silicon（M1 及更新芯片）。
 已内置运行环境，无需 Python、终端或本地大模型。

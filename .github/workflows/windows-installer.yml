@@ -71,4 +71,6 @@ jobs:
             dist/*-Setup.exe
             dist/*-x64.zip
             dist/SHA256SUMS-Windows.txt
+            smoke-result.json
+            smoke-ui.png
           if-no-files-found: error
