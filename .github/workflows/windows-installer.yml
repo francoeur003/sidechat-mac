@@ -1,0 +1,74 @@
+name: Windows installer
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/sidechat-windows-installer]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+      - name: Install build dependencies
+        run: python -m pip install -r packaging/requirements-windows.txt
+      - name: Test providers and Windows behavior
+        env:
+          PYTHONPATH: src
+          SIDECHAT_MODE: '1'
+        run: python -m unittest discover -s tests -p test_sidechat*.py -v
+      - name: Source GUI and OCR smoke test
+        run: python src/sidechat_windows.py --smoke-test
+      - name: Build Windows executable
+        run: |
+          python -c "from PIL import Image; Image.open('assets/sidechat-logo.png').save('assets/SideChat.ico',sizes=[(16,16),(32,32),(48,48),(256,256)])"
+          python -m PyInstaller --noconfirm --clean --windowed --name SideChat --paths src --icon assets/SideChat.ico --collect-all winsdk --collect-all keyring --hidden-import keyring.backends.Windows --add-data "LICENSE;." --add-data "NOTICE.md;." --exclude-module torch --exclude-module transformers src/sidechat_windows.py
+      - name: Packaged GUI smoke test
+        shell: pwsh
+        run: |
+          Remove-Item smoke-result.json -ErrorAction SilentlyContinue
+          $proc = Start-Process -FilePath 'dist/SideChat/SideChat.exe' -ArgumentList '--smoke-test' -PassThru
+          if (-not $proc.WaitForExit(60000)) { $proc.Kill(); throw 'Packaged GUI timed out' }
+          if ($proc.ExitCode -ne 0) { throw 'Packaged GUI failed' }
+          if (-not (Test-Path smoke-result.json)) { throw 'Packaged smoke evidence missing' }
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = 'C:/Program Files (x86)/Inno Setup 6/ISCC.exe'
+          if (-not (Test-Path $iscc)) { choco install innosetup --yes --no-progress }
+          & $iscc packaging/windows.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed' }
+      - name: Install and launch installed application
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP 'SideChat-install-test'
+          $installer = (Resolve-Path 'dist/SideChat-0.3.0-Windows-x64-Setup.exe').Path
+          $proc = Start-Process $installer -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /DIR=$target" -PassThru -Wait
+          if ($proc.ExitCode -ne 0) { throw 'Silent installation failed' }
+          $exe = Join-Path $target 'SideChat.exe'
+          if (-not (Test-Path $exe)) { throw 'Installed executable missing' }
+          Remove-Item smoke-result.json -ErrorAction SilentlyContinue
+          $proc = Start-Process $exe -ArgumentList '--smoke-test' -PassThru
+          if (-not $proc.WaitForExit(60000)) { $proc.Kill(); throw 'Installed application timed out' }
+          if ($proc.ExitCode -ne 0) { throw 'Installed application failed' }
+          if (-not (Test-Path smoke-result.json)) { throw 'Installed smoke evidence missing' }
+          $proc = Start-Process (Join-Path $target 'unins000.exe') -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -PassThru -Wait
+          if ($proc.ExitCode -ne 0) { throw 'Uninstall failed' }
+      - name: Package and checksum
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/SideChat -DestinationPath dist/SideChat-0.3.0-Windows-x64.zip
+          Get-ChildItem dist/*-Setup.exe,dist/*-x64.zip | ForEach-Object { $hash = (Get-FileHash $_ -Algorithm SHA256).Hash.ToLower(); "$hash  $($_.Name)" } | Set-Content dist/SHA256SUMS-Windows.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SideChat-Windows-0.3.0
+          path: |
+            dist/*-Setup.exe
+            dist/*-x64.zip
+            dist/SHA256SUMS-Windows.txt
+          if-no-files-found: error

@@ -1,0 +1,6 @@
+numpy>=2,<3
+pillow>=11,<13
+mss>=10,<11
+keyring>=25,<26
+winsdk==1.0.0b10
+pyinstaller>=6.16,<7

@@ -1,0 +1,20 @@
+侧语 SideChat 0.3.0 · Windows 测试版
+
+适用 Windows 10 / 11 x64，自带 Python 运行环境。
+运行 Setup.exe，按提示安装，开始菜单打开 SideChat。
+这是独立社区测试版本，安装包没有商业代码签名。请从项目 GitHub Release 下载并核对 SHA256。
+
+1. 设置中填写自己的 Jev 和 DeepSeek API Key。
+2. 同意使用接口后点击连接：会测试两个接口并消耗服务额度。
+3. 粘贴对方消息，或点击“框选对方最新一条文字消息”。
+4. 截图 OCR 在本机完成，截图不保存、不上传。框选后先检查文字，再点击分析。
+5. 查看两条建议，点击复制，在微信里由你确认后发送。
+
+Windows 版采用手动消息选择；不自动定位微信、不后台轮询、不自动填入或发送。
+本机 OCR 需要安装 Windows 简体中文语言包的文字识别功能；没有语言包时仍可粘贴文字。
+分析会将确认的消息发送给 Jev 和 DeepSeek，并使用你的 API 额度。
+Key 只保存在 Windows 凭据管理器，没有明文存储回退。
+关闭后停止任务；重新打开可使用已保存的授权。卸载只移除程序，不删除凭据。
+
+原项目：jev-chat/jev-chat-jarvis；直接 Mac 上游：jev-chat/jev-chat-jarvis-mac。
+这是独立社区改版，与微信、Jev、DeepSeek 官方无隶属关系。完整版权见 LICENSE 和 NOTICE.md。

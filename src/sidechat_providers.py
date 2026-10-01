@@ -1,11 +1,13 @@
 """Public distribution provider configuration, isolated from developer credentials."""
 import json
 import os
+import sys
 import threading
 import urllib.error
 from pathlib import Path
 
-CONFIG_DIR=Path.home()/'Library/Application Support/SideChat'
+CONFIG_DIR=(Path(os.environ.get('LOCALAPPDATA',str(Path.home()/'AppData/Local')))/'SideChat'
+            if sys.platform=='win32' else Path.home()/'Library/Application Support/SideChat')
 CONFIG_FILE=CONFIG_DIR/'settings.json'
 PROVIDERS={
     'openai': {'label':'GPT / OpenAI','base':'https://api.openai.com/v1','model':'gpt-4.1-mini'},
@@ -36,13 +38,13 @@ def write_settings(data):
     os.chmod(tmp,0o600);tmp.replace(CONFIG_FILE)
 
 def get_key(provider):
-    import sidechat_keychain
+    import sidechat_secrets as sidechat_keychain
     with _lock:
         if provider not in _cache: _cache[provider]=sidechat_keychain.read(provider)
         return _cache[provider]
 
 def set_key(provider,key):
-    import sidechat_keychain
+    import sidechat_secrets as sidechat_keychain
     sidechat_keychain.save(provider,key)
     with _lock: _cache[provider]=key
 
