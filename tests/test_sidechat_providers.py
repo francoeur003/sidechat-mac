@@ -14,7 +14,7 @@ class DistributionTests(unittest.TestCase):
     def test_settings_never_serialize_supplied_secret_fields(self):
         with tempfile.TemporaryDirectory() as d,patch.object(p,'CONFIG_DIR',Path(d)),patch.object(p,'CONFIG_FILE',Path(d)/'settings.json'):
             p.write_settings({'consent':True,'api_key':'synthetic-test-secret','extra':'not allowed'})
-            raw=p.CONFIG_FILE.read_text();self.assertNotIn('synthetic-test-secret',raw);self.assertNotIn('extra',raw)
+            raw=p.CONFIG_FILE.read_text(encoding='utf-8');self.assertNotIn('synthetic-test-secret',raw);self.assertNotIn('extra',raw)
             self.assertTrue(p.load_settings()['consent'])
     def test_old_single_service_consent_requires_new_opt_in(self):
         with tempfile.TemporaryDirectory() as d,patch.object(p,'CONFIG_FILE',Path(d)/'settings.json'):

@@ -22,7 +22,7 @@ _lock=threading.RLock()
 
 def load_settings():
     defaults=json.loads(json.dumps(DEFAULTS))
-    try: data=json.loads(CONFIG_FILE.read_text())
+    try: data=json.loads(CONFIG_FILE.read_text(encoding='utf-8'))
     except (OSError,ValueError): return defaults
     if not isinstance(data,dict):return defaults
     # v1 consent covered one selected service, not the new two-service workflow.
@@ -34,7 +34,7 @@ def write_settings(data):
     clean=json.loads(json.dumps(DEFAULTS))
     clean['consent']=data.get('consent') is True
     CONFIG_DIR.mkdir(parents=True,exist_ok=True)
-    tmp=CONFIG_FILE.with_suffix('.tmp');tmp.write_text(json.dumps(clean,ensure_ascii=False,indent=2))
+    tmp=CONFIG_FILE.with_suffix('.tmp');tmp.write_text(json.dumps(clean,ensure_ascii=False,indent=2),encoding='utf-8')
     os.chmod(tmp,0o600);tmp.replace(CONFIG_FILE)
 
 def get_key(provider):
