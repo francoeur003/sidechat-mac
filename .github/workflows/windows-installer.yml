@@ -39,6 +39,8 @@ jobs:
       - name: Build installer
         shell: pwsh
         run: |
+          python packaging/windows_licenses.py
+          if ($LASTEXITCODE -ne 0) { throw 'License collection failed' }
           $iscc = 'C:/Program Files (x86)/Inno Setup 6/ISCC.exe'
           if (-not (Test-Path $iscc)) { choco install innosetup --yes --no-progress }
           & $iscc packaging/windows.iss

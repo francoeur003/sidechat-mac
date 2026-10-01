@@ -19,7 +19,7 @@ def validate_message(text):
 class WindowsApp:
     def __init__(self, root):
         self.root=root; self.events=queue.Queue(); self.busy=False
-        root.title(brand.NAME+' · Windows 测试版');root.geometry('420x580');root.minsize(380,540)
+        root.title(brand.NAME+' · Windows 测试版');root.geometry('420x720');root.minsize(380,700)
         root.attributes('-topmost',True)
         frame=ttk.Frame(root,padding=16);frame.pack(fill='both',expand=True)
         ttk.Label(frame,text='侧语 SideChat',font=('Microsoft YaHei UI',17,'bold')).pack(anchor='w')
